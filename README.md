@@ -1,2 +1,4 @@
-# Sample-Project-Setup-Repo
-This repo is to be template that can be cloned when you roll on to a new project, so that you have the skills and templates ready to go and start using.
+# Sample Project Setup Repo
+
+This repo is a template that can be cloned when you roll onto a new project,
+so you have the skills and templates ready to use.
