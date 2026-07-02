@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """
 convert_to_markdown.py
-Converts DOCX and VTT files to Markdown (.md).
+Converts DOCX, PDF, and VTT files to Markdown (.md).
 
 Usage:
-    python convert_to_markdown.py <input_path> [--output-dir <dir>] [--vtt-speaker-labels]
+    python convert_to_markdown.py <input_path> [--output-dir <dir>] [--vtt-speaker-labels] [--delete-source]
 
 Arguments:
     input_path          Path to a single file or a directory of files to convert.
     --output-dir        Directory to write output .md files (defaults to same dir as input).
     --vtt-speaker-labels  When set, preserves speaker labels from VTT in the output.
+    --delete-source     Delete the original file after successful conversion.
 
 Dependencies:
-    pip install python-docx
+    pip install python-docx pdfplumber
 """
 
 import argparse
@@ -146,19 +147,107 @@ def convert_vtt(input_path: Path, output_path: Path, keep_speaker_labels: bool =
     print(f"Converted VTT  -> {output_path}")
 
 
+def convert_pdf(input_path: Path, output_path: Path) -> bool:
+    """
+    Convert PDF to Markdown, extracting text, tables, and images.
+    Returns True if images were extracted, False otherwise.
+    """
+    try:
+        import pdfplumber
+    except ImportError:
+        print("ERROR: pdfplumber is not installed. Run: pip install pdfplumber")
+        sys.exit(1)
+
+    lines = []
+    images_extracted = False
+    image_dir = output_path.parent / (output_path.stem + "_images")
+    image_counter = 0
+
+    try:
+        with pdfplumber.open(str(input_path)) as pdf:
+            for page_num, page in enumerate(pdf.pages, 1):
+                # Extract text with layout awareness
+                text = page.extract_text()
+                if text:
+                    # Split into paragraphs and detect potential headings
+                    paragraphs = text.split("\n")
+                    for para in paragraphs:
+                        para = para.strip()
+                        if not para:
+                            lines.append("")
+                            continue
+                        
+                        # Simple heuristic: if text is very short and appears at top of page,
+                        # or in first paragraph, it's likely a heading
+                        # For now, we'll mark short lines (< 60 chars) at the start as potential headings
+                        if len(para) < 60 and page_num == 1 and len(lines) < 5:
+                            lines.append(f"# {para}")
+                        else:
+                            lines.append(para)
+                
+                # Extract tables
+                tables = page.extract_tables()
+                if tables:
+                    lines.append("")
+                    for table in tables:
+                        if table:
+                            # Convert table to pipe format
+                            header_row = table[0]
+                            headers = [str(cell) if cell else "" for cell in header_row]
+                            lines.append("| " + " | ".join(headers) + " |")
+                            lines.append("| " + " | ".join(["---"] * len(headers)) + " |")
+                            
+                            for row in table[1:]:
+                                cells = [str(cell) if cell else "" for cell in row]
+                                lines.append("| " + " | ".join(cells) + " |")
+                            lines.append("")
+                
+                # Extract images
+                for img in page.images:
+                    try:
+                        image_dir.mkdir(parents=True, exist_ok=True)
+                        bbox = img["top"], img["bottom"], img["x0"], img["x1"]
+                        im = page.crop(bbox).to_image()
+                        image_path = image_dir / f"image_{image_counter}.png"
+                        im.save(image_path)
+                        
+                        # Add image reference to markdown
+                        lines.append(f"![Image](image_{image_counter}.png)")
+                        image_counter += 1
+                        images_extracted = True
+                    except Exception as e:
+                        print(f"Warning: Could not extract image from page {page_num}: {e}")
+    
+    except Exception as e:
+        print(f"ERROR: Failed to process PDF {input_path}: {e}")
+        sys.exit(1)
+
+    if lines:
+        output_path.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
+        print(f"Converted PDF  -> {output_path}")
+        if images_extracted:
+            print(f"  Images extracted to: {image_dir}")
+    else:
+        print(f"WARNING: No content extracted from {input_path}")
+
+    return images_extracted
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Convert DOCX/VTT files to Markdown.")
+    parser = argparse.ArgumentParser(description="Convert PDF/DOCX/VTT files to Markdown.")
     parser.add_argument("input_path", help="File or directory to convert.")
     parser.add_argument("--output-dir", default=None, help="Output directory for .md files.")
     parser.add_argument("--vtt-speaker-labels", action="store_true", default=True,
                         help="Preserve speaker labels in VTT output (default: on).")
+    parser.add_argument("--delete-source", action="store_true", default=False,
+                        help="Delete the original file after successful conversion.")
     args = parser.parse_args()
 
     input_path = Path(args.input_path)
     output_dir = Path(args.output_dir) if args.output_dir else None
 
     if input_path.is_dir():
-        files = list(input_path.glob("*.docx")) + list(input_path.glob("*.vtt"))
+        files = list(input_path.glob("*.docx")) + list(input_path.glob("*.vtt")) + list(input_path.glob("*.pdf"))
     elif input_path.is_file():
         files = [input_path]
     else:
@@ -166,7 +255,7 @@ def main():
         sys.exit(1)
 
     if not files:
-        print("No .docx or .vtt files found.")
+        print("No .docx, .vtt, or .pdf files found.")
         sys.exit(0)
 
     for file in files:
@@ -174,10 +263,25 @@ def main():
         dest_dir.mkdir(parents=True, exist_ok=True)
         output_file = dest_dir / (file.stem + ".md")
 
+        images_extracted = False
+        
         if file.suffix.lower() == ".docx":
             convert_docx(file, output_file)
         elif file.suffix.lower() == ".vtt":
             convert_vtt(file, output_file, keep_speaker_labels=args.vtt_speaker_labels)
+        elif file.suffix.lower() == ".pdf":
+            images_extracted = convert_pdf(file, output_file)
+        
+        # Delete source file if --delete-source flag is set
+        if args.delete_source:
+            if images_extracted:
+                print(f"  Note: Images extracted to {output_file.parent / (output_file.stem + '_images')}; "
+                      f"deleting {file.name}")
+            try:
+                file.unlink()
+                print(f"Deleted source file: {file}")
+            except Exception as e:
+                print(f"WARNING: Could not delete {file}: {e}")
 
     print(f"\nDone. {len(files)} file(s) converted.")
 
